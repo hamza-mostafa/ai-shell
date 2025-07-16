@@ -37,14 +37,19 @@ const sample = <T>(arr: T[]): T | undefined => {
 };
 
 async function runScript(script: string) {
-  p.outro(`${i18n.t('Running')}: ${script}`);
+  // Strip code block markers and whitespace
+  let cleanScript = script.trim();
+  if (cleanScript.startsWith('```')) {
+    cleanScript = cleanScript.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
+  }
+  p.outro(`${i18n.t('Running')}: ${cleanScript}`);
   console.log('');
   try {
-    await execaCommand(script, {
+    await execaCommand(cleanScript, {
       stdio: 'inherit',
       shell: process.env.SHELL || true,
     });
-    appendToShellHistory(script);
+    appendToShellHistory(cleanScript);
   } catch (error) {
     // Nothing needed, it'll output to stderr
   }
@@ -102,10 +107,11 @@ export async function prompt({
   silentMode,
 }: { usePrompt?: string; silentMode?: boolean } = {}) {
   const {
-    OPENAI_KEY: key,
+    API_KEY: key,
     SILENT_MODE,
-    OPENAI_API_ENDPOINT: apiEndpoint,
+    API_ENDPOINT: apiEndpoint,
     MODEL: model,
+    PROVIDER: provider,
   } = await getConfig();
   const skipCommandExplanation = silentMode || SILENT_MODE;
 
@@ -115,11 +121,13 @@ export async function prompt({
   const thePrompt = usePrompt || (await getPrompt());
   const spin = p.spinner();
   spin.start(i18n.t(`Loading...`));
+  
   const { readInfo, readScript } = await getScriptAndInfo({
     prompt: thePrompt,
     key,
     model,
     apiEndpoint,
+    provider,
   });
   spin.stop(`${i18n.t('Your script')}:`);
   console.log('');
@@ -136,6 +144,7 @@ export async function prompt({
         key,
         model,
         apiEndpoint,
+        provider,
       });
       spin.stop(`${i18n.t('Explanation')}:`);
       console.log('');
@@ -146,7 +155,7 @@ export async function prompt({
     }
   }
 
-  await runOrReviseFlow(script, key, model, apiEndpoint, silentMode);
+  await runOrReviseFlow(script, key, model, apiEndpoint, provider, silentMode);
 }
 
 async function runOrReviseFlow(
@@ -154,6 +163,7 @@ async function runOrReviseFlow(
   key: string,
   model: string,
   apiEndpoint: string,
+  provider: string,
   silentMode?: boolean
 ) {
   const emptyScript = script.trim() === '';
@@ -191,7 +201,7 @@ async function runOrReviseFlow(
         label: '🔁 ' + i18n.t('Revise'),
         hint: i18n.t('Give feedback via prompt and get a new result'),
         value: async () => {
-          await revisionFlow(script, key, model, apiEndpoint, silentMode);
+          await revisionFlow(script, key, model, apiEndpoint, provider, silentMode);
         },
       },
       {
@@ -223,6 +233,7 @@ async function revisionFlow(
   key: string,
   model: string,
   apiEndpoint: string,
+  provider: string,
   silentMode?: boolean
 ) {
   const revision = await promptForRevision();
@@ -234,6 +245,7 @@ async function revisionFlow(
     key,
     model,
     apiEndpoint,
+    provider,
   });
   spin.stop(`${i18n.t(`Your new script`)}:`);
 
@@ -251,6 +263,7 @@ async function revisionFlow(
       key,
       model,
       apiEndpoint,
+      provider,
     });
 
     infoSpin.stop(`${i18n.t('Explanation')}:`);
@@ -261,7 +274,7 @@ async function revisionFlow(
     console.log(dim('•'));
   }
 
-  await runOrReviseFlow(script, key, model, apiEndpoint, silentMode);
+  await runOrReviseFlow(script, key, model, apiEndpoint, provider, silentMode);
 }
 
 export const parseAssert = (name: string, condition: any, message: string) => {

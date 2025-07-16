@@ -9,7 +9,7 @@ export async function* streamToIterable(stream: IncomingMessage) {
     while ((eolIndex = previous.indexOf('\n')) >= 0) {
       // line includes the EOL
       const line = previous.slice(0, eolIndex + 1).trimEnd();
-      if (line.startsWith('data: ')) yield line;
+      if (line.length > 0) yield line;
       previous = previous.slice(eolIndex + 1);
     }
   }

@@ -15,15 +15,9 @@ import './replace-all-polyfill';
 import i18n from './i18n';
 import { stripRegexPatterns } from './strip-regex-patterns';
 import readline from 'readline';
+import { getProvider } from './providers';
 
 const explainInSecondRequest = true;
-
-function getOpenAi(key: string, apiEndpoint: string) {
-  const openAi = new OpenAIApi(
-    new Configuration({ apiKey: key, basePath: apiEndpoint })
-  );
-  return openAi;
-}
 
 // Openai outputs markdown format for code blocks. It oftne uses
 // a github style like: "```bash"
@@ -34,11 +28,13 @@ export async function getScriptAndInfo({
   key,
   model,
   apiEndpoint,
+  provider,
 }: {
   prompt: string;
   key: string;
   model?: string;
   apiEndpoint: string;
+  provider: string;
 }) {
   const fullPrompt = getFullPrompt(prompt);
   const stream = await generateCompletion({
@@ -47,6 +43,7 @@ export async function getScriptAndInfo({
     key,
     model,
     apiEndpoint,
+    provider,
   });
   const iterableStream = streamToIterable(stream);
   return {
@@ -61,79 +58,23 @@ export async function generateCompletion({
   key,
   model,
   apiEndpoint,
+  provider,
 }: {
   prompt: string | ChatCompletionRequestMessage[];
   number?: number;
   model?: string;
   key: string;
   apiEndpoint: string;
+  provider: string;
 }) {
-  const openAi = getOpenAi(key, apiEndpoint);
-  try {
-    const completion = await openAi.createChatCompletion(
-      {
-        model: model || 'gpt-4o-mini',
-        messages: Array.isArray(prompt)
-          ? prompt
-          : [{ role: 'user', content: prompt }],
-        n: Math.min(number, 10),
-        stream: true,
-      },
-      { responseType: 'stream' }
-    );
-
-    return completion.data as unknown as IncomingMessage;
-  } catch (err) {
-    const error = err as AxiosError;
-
-    if (error.code === 'ENOTFOUND') {
-      throw new KnownError(
-        `Error connecting to ${error.request.hostname} (${error.request.syscall}). Are you connected to the internet?`
-      );
-    }
-
-    const response = error.response;
-    let message = response?.data as string | object | IncomingMessage;
-    if (response && message instanceof IncomingMessage) {
-      message = await streamToString(
-        response.data as unknown as IncomingMessage
-      );
-      try {
-        // Handle if the message is JSON. It should be but occasionally will
-        // be HTML, so lets handle both
-        message = JSON.parse(message);
-      } catch (e) {
-        // Ignore
-      }
-    }
-
-    const messageString = message && JSON.stringify(message, null, 2);
-    if (response?.status === 429) {
-      throw new KnownError(
-        dedent`
-        Request to OpenAI failed with status 429. This is due to incorrect billing setup or excessive quota usage. Please follow this guide to fix it: https://help.openai.com/en/articles/6891831-error-code-429-you-exceeded-your-current-quota-please-check-your-plan-and-billing-details
-
-        You can activate billing here: https://platform.openai.com/account/billing/overview . Make sure to add a payment method if not under an active grant from OpenAI.
-
-        Full message from OpenAI:
-      ` +
-          '\n\n' +
-          messageString +
-          '\n'
-      );
-    } else if (response && message) {
-      throw new KnownError(
-        dedent`
-        Request to OpenAI failed with status ${response?.status}:
-      ` +
-          '\n\n' +
-          messageString +
-          '\n'
-      );
-    }
-
-    throw error;
-  }
+  const providerInstance = getProvider(provider);
+  return providerInstance.generateCompletion({
+    prompt,
+    number,
+    model,
+    key,
+    apiEndpoint,
+  });
 }
 
 export async function getExplanation({
@@ -141,11 +82,13 @@ export async function getExplanation({
   key,
   model,
   apiEndpoint,
+  provider,
 }: {
   script: string;
   key: string;
   model?: string;
   apiEndpoint: string;
+  provider: string;
 }) {
   const prompt = getExplanationPrompt(script);
   const stream = await generateCompletion({
@@ -154,6 +97,7 @@ export async function getExplanation({
     number: 1,
     model,
     apiEndpoint,
+    provider,
   });
   const iterableStream = streamToIterable(stream);
   return { readExplanation: readData(iterableStream) };
@@ -165,12 +109,14 @@ export async function getRevision({
   key,
   model,
   apiEndpoint,
+  provider,
 }: {
   prompt: string;
   code: string;
   key: string;
   model?: string;
   apiEndpoint: string;
+  provider: string;
 }) {
   const fullPrompt = getRevisionPrompt(prompt, code);
   const stream = await generateCompletion({
@@ -179,6 +125,7 @@ export async function getRevision({
     number: 1,
     model,
     apiEndpoint,
+    provider,
   });
   const iterableStream = streamToIterable(stream);
   return {
@@ -222,6 +169,7 @@ export const readData =
             return;
           }
 
+          // Accept both SSE (data:) and NDJSON (no prefix)
           if (payload.startsWith('data:')) {
             content = parseContent(payload);
             // Use buffer only for start detection
@@ -245,6 +193,21 @@ export const readData =
               data += contentWithoutExcluded;
               writer(contentWithoutExcluded);
             }
+          } else if (payload.trim().length > 0) {
+            // NDJSON: try to parse as JSON
+            try {
+              const parsed = JSON.parse(payload.trim());
+              let ndjsonContent = '';
+              if (parsed.message && typeof parsed.message.content === 'string') {
+                ndjsonContent = parsed.message.content;
+              }
+              if (ndjsonContent) {
+                data += ndjsonContent;
+                writer(ndjsonContent);
+              }
+            } catch (err) {
+              // ignore
+            }
           }
         }
       }
@@ -252,8 +215,13 @@ export const readData =
       function parseContent(payload: string): string {
         const data = payload.replaceAll(/(\n)?^data:\s*/g, '');
         try {
-          const delta = JSON.parse(data.trim());
-          return delta.choices?.[0]?.delta?.content ?? '';
+          const parsed = JSON.parse(data.trim());
+          // Ollama format: { message: { content: ... }, done: false }
+          if (parsed.message && typeof parsed.message.content === 'string') {
+            return parsed.message.content;
+          }
+          // OpenAI format: { choices: [ { delta: { content: ... } } ] }
+          return parsed.choices?.[0]?.delta?.content ?? '';
         } catch (error) {
           return `Error with JSON.parse and ${payload}.\n${error}`;
         }
@@ -321,10 +289,9 @@ function getRevisionPrompt(prompt: string, code: string) {
 
 export async function getModels(
   key: string,
-  apiEndpoint: string
+  apiEndpoint: string,
+  provider: string
 ): Promise<Model[]> {
-  const openAi = getOpenAi(key, apiEndpoint);
-  const response = await openAi.listModels();
-
-  return response.data.data.filter((model) => model.object === 'model');
+  const providerInstance = getProvider(provider);
+  return providerInstance.getModels({ key, apiEndpoint });
 }

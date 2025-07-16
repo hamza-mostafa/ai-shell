@@ -17,9 +17,10 @@ export default command(
   },
   async () => {
     const {
-      OPENAI_KEY: key,
-      OPENAI_API_ENDPOINT: apiEndpoint,
+      API_KEY: key,
+      API_ENDPOINT: apiEndpoint,
       MODEL: model,
+      PROVIDER: provider,
     } = await getConfig();
     const chatHistory: ChatCompletionRequestMessage[] = [];
 
@@ -46,11 +47,13 @@ export default command(
         role: 'user',
         content: userPrompt,
       });
+      
       const { readResponse } = await getResponse({
         prompt: chatHistory,
         key,
         model,
         apiEndpoint,
+        provider,
       });
 
       infoSpin.stop(`${green('AI Shell:')}`);
@@ -77,12 +80,14 @@ async function getResponse({
   key,
   model,
   apiEndpoint,
+  provider,
 }: {
   prompt: string | ChatCompletionRequestMessage[];
   number?: number;
   model?: string;
   key: string;
   apiEndpoint: string;
+  provider: string;
 }) {
   const stream = await generateCompletion({
     prompt,
@@ -90,6 +95,7 @@ async function getResponse({
     model,
     number,
     apiEndpoint,
+    provider,
   });
 
   const iterableStream = streamToIterable(stream);
